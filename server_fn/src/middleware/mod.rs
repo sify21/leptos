@@ -104,6 +104,7 @@ mod axum {
 
 #[cfg(feature = "actix")]
 mod actix {
+    use super::{BoxedService, Service};
     use crate::{
         request::actix::ActixRequest,
         response::{actix::ActixResponse, Res},
@@ -155,6 +156,69 @@ mod actix {
                     ActixResponse::error_response(&path, &err).take()
                 }))
             })
+        }
+    }
+
+    impl actix_web::dev::Service<HttpRequest>
+        for BoxedService<HttpRequest, HttpResponse>
+    {
+        type Response = HttpResponse;
+        type Error = actix_web::Error;
+        type Future =
+            Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>>>>;
+
+        fn poll_ready(
+            &self,
+            ctx: &mut core::task::Context<'_>,
+        ) -> std::task::Poll<Result<(), Self::Error>> {
+            (*self.0 as actix_web::dev::Service<_>).poll_ready(ctx)
+        }
+
+        fn call(&self, req: HttpRequest) -> Self::Future {
+            let inner = self.0.run(req);
+            Box::pin(async move { Ok(inner.await) })
+        }
+    }
+
+    impl actix_web::dev::Service<HttpRequest>
+        for BoxedService<ActixRequest, ActixResponse>
+    {
+        type Response = HttpResponse;
+        type Error = actix_web::Error;
+        type Future =
+            Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>>>>;
+
+        fn poll_ready(
+            &self,
+            ctx: &mut core::task::Context<'_>,
+        ) -> std::task::Poll<Result<(), Self::Error>> {
+            (*self.0 as actix_web::dev::Service<_>).poll_ready(ctx)
+        }
+
+        fn call(&self, req: HttpRequest) -> Self::Future {
+            let inner = self.0.run(req);
+            Box::pin(async move { Ok(inner.await.take()) })
+        }
+    }
+
+    impl<T> super::Layer<HttpRequest, HttpResponse> for T
+    where
+        T: actix_web::dev::Transform<
+                BoxedService<HttpRequest, HttpResponse>,
+                HttpRequest,
+            > + Sync
+            + Send
+            + 'static,
+        T::Response: HttpResponse + Send + 'static,
+    {
+        fn layer(
+            &self,
+            inner: BoxedService<HttpRequest, HttpResponse>,
+        ) -> BoxedService<HttpRequest, HttpResponse> {
+            // TODO this won't work.
+            // actix's middleware, which implements Transform trait, is actually a "service-generating factory", and it generates the wrapping Service (or the Transform component) asynchronously.
+            // But Leptos's Layer works in synchronous way.
+            BoxedService::new(self.new_transform(*inner.0))
         }
     }
 }
